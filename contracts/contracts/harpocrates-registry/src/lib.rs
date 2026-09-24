@@ -36,6 +36,31 @@ const MAX_LINEAGE_DEPTH: u32 = 4;
 const MAX_LINEAGE_FANOUT: u32 = 4;
 const MAX_LINEAGE_PAYLOAD_BYTES: u32 = 4096;
 
+
+// ---------------------------------------------------------------------------
+// Independent timestamp claims (#339)
+// ---------------------------------------------------------------------------
+//
+// On-chain commitments to off-chain time attestations (see
+// `backend/docs/time-attestation-protocol.md`). The ledger timestamp and
+// sequence provide an independent anchor; RFC 3161 material is stored only as
+// a 32-byte commitment (never raw tokens, media, or secrets).
+//
+// Source bitflags (combinable):
+pub const TIMESTAMP_SOURCE_CLAIMED: u32 = 0x01;
+pub const TIMESTAMP_SOURCE_STELLAR: u32 = 0x02;
+pub const TIMESTAMP_SOURCE_RFC3161: u32 = 0x04;
+
+/// Maximum allowed claimed_time drift ahead of ledger time (5 minutes).
+pub const MAX_TIMESTAMP_FUTURE_DRIFT_SECS: u64 = 300;
+
+/// Assurance levels aligned with the off-chain protocol hierarchy.
+pub const TIMESTAMP_ASSURANCE_NONE: u32 = 0;
+pub const TIMESTAMP_ASSURANCE_CLAIMED: u32 = 1;
+pub const TIMESTAMP_ASSURANCE_OBSERVED: u32 = 2;
+pub const TIMESTAMP_ASSURANCE_INDEPENDENT: u32 = 3;
+
+
 // ---------------------------------------------------------------------------
 // Proof-history bounds (#90)
 // ---------------------------------------------------------------------------
@@ -274,6 +299,35 @@ pub struct LineageRecord {
     pub output_digest: BytesN<32>,
     pub depth: u32,
 }
+
+
+/// On-chain independent timestamp claim for a registered proof (#339).
+///
+/// Stores commitments and ledger-derived anchors only — never TSA token
+/// bytes, media, witness values, or private keys.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TimestampClaim {
+    /// Proof this claim is bound to.
+    pub proof_id: BytesN<32>,
+    /// Digest of the off-chain `harpocrates-time-attestation/v1` envelope.
+    pub attestation_digest: BytesN<32>,
+    /// Optional claimed capture time (unix seconds). `0` means absent.
+    pub claimed_time: u64,
+    /// Ledger timestamp when this claim was anchored (independent observed time).
+    pub anchored_at: u64,
+    /// Ledger sequence at anchor time for external cross-checks.
+    pub ledger_sequence: u32,
+    /// Combinable `TIMESTAMP_SOURCE_*` bitflags.
+    pub sources: u32,
+    /// Commitment to an RFC 3161 token (`[0;32]` if absent).
+    pub rfc3161_commitment: BytesN<32>,
+    /// Authenticated actor who submitted the claim.
+    pub actor: Address,
+    /// Derived assurance level (`TIMESTAMP_ASSURANCE_*`).
+    pub assurance: u32,
+}
+
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -554,6 +608,22 @@ pub struct DisputeRecord {
 }
 
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Timestamp claim events (#339) — commitments and ledger metadata only
+// ---------------------------------------------------------------------------
+
+#[contractevent(topics = ["timestamp", "anchor"])]
+pub struct TimestampClaimAnchored {
+    #[topic]
+    pub proof_id: BytesN<32>,
+    pub attestation_digest: BytesN<32>,
+    pub sources: u32,
+    pub assurance: u32,
+    pub anchored_at: u64,
+    pub ledger_sequence: u32,
+}
+
 // Dispute events (privacy-safe: commitments and timestamps only)
 // ---------------------------------------------------------------------------
 
@@ -878,6 +948,8 @@ pub enum DataKey {
     Schema(BytesN<32>),
     /// Verifiable derivative lineage record keyed by output digest.
     Lineage(BytesN<32>),
+    /// Independent timestamp claim keyed by proof_id (#339).
+    TimestampClaim(BytesN<32>),
     /// Stores the `DisputeRecord` for a given dispute_id (#dispute).
     Dispute(BytesN<32>),
     /// Counts open (non-terminal) disputes for a proof_id (#dispute).
@@ -987,6 +1059,14 @@ pub enum RegistryError {
     ReporterOnCooldown = 66,
     /// The dispute is not in the state this transition requires.
     InvalidDisputeTransition = 67,
+    /// Timestamp claim is malformed, far-future, or missing required digest (#339).
+    InvalidTimestampClaim = 68,
+    /// No timestamp claim exists for the requested proof (#339).
+    TimestampClaimNotFound = 69,
+    /// A timestamp claim is already anchored and the update is not an upgrade (#339).
+    TimestampClaimAlreadyAnchored = 70,
+    /// Caller is neither admin nor the proof's source/issuer (#339).
+    UnauthorizedTimestampActor = 71,
 }
 
 #[contract]
@@ -2334,6 +2414,135 @@ impl HarpocratesRegistry {
         env.storage().persistent().get(&DataKey::Lineage(output_digest))
     }
 
+
+    // -----------------------------------------------------------------------
+    // Independent timestamp claims (#339)
+    // -----------------------------------------------------------------------
+
+    /// Anchor an independent timestamp claim for an existing proof.
+    ///
+    /// Always records the current ledger timestamp/sequence as a Stellar
+    /// independent source. Optional `claimed_time` and RFC 3161 commitment
+    /// raise assurance without storing raw tokens or private material.
+    ///
+    /// Re-anchoring is allowed only when the new claim is a strict assurance
+    /// upgrade (or adds an RFC 3161 commitment). Compatible callers that omit
+    /// timestamp claims are unaffected.
+    pub fn anchor_timestamp_claim(
+        env: Env,
+        actor: Address,
+        proof_id: BytesN<32>,
+        attestation_digest: BytesN<32>,
+        claimed_time: u64,
+        rfc3161_commitment: BytesN<32>,
+    ) -> TimestampClaim {
+        // Proof must exist.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Proof(proof_id.clone()))
+        {
+            panic_with_error!(&env, RegistryError::TimestampClaimNotFound);
+        }
+
+        let proof = get_proof_record(&env, &proof_id);
+        require_timestamp_claim_actor(&env, &actor, &proof);
+
+        // Reject zero attestation digest (must bind to off-chain envelope).
+        let zero = BytesN::from_array(&env, &[0u8; 32]);
+        if attestation_digest == zero {
+            panic_with_error!(&env, RegistryError::InvalidTimestampClaim);
+        }
+
+        let now = env.ledger().timestamp();
+        if claimed_time > 0 && claimed_time > now.saturating_add(MAX_TIMESTAMP_FUTURE_DRIFT_SECS) {
+            panic_with_error!(&env, RegistryError::InvalidTimestampClaim);
+        }
+
+        let has_rfc3161 = rfc3161_commitment != zero;
+        // Empty commitment is fine; non-empty is treated as RFC 3161 present.
+        // (No further parsing on-chain — resource-bounded by fixed 32 bytes.)
+
+        let mut sources = TIMESTAMP_SOURCE_STELLAR;
+        if claimed_time > 0 {
+            sources |= TIMESTAMP_SOURCE_CLAIMED;
+        }
+        if has_rfc3161 {
+            sources |= TIMESTAMP_SOURCE_RFC3161;
+        }
+
+        let assurance = compute_timestamp_assurance(sources);
+        let ledger_sequence = env.ledger().sequence();
+
+        let claim = TimestampClaim {
+            proof_id: proof_id.clone(),
+            attestation_digest: attestation_digest.clone(),
+            claimed_time,
+            anchored_at: now,
+            ledger_sequence,
+            sources,
+            rfc3161_commitment: if has_rfc3161 {
+                rfc3161_commitment
+            } else {
+                zero
+            },
+            actor: actor.clone(),
+            assurance,
+        };
+
+        let key = DataKey::TimestampClaim(proof_id.clone());
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<DataKey, TimestampClaim>(&key)
+        {
+            // Allow only upgrades: higher assurance, or same assurance with new RFC3161.
+            let adds_rfc3161 = has_rfc3161
+                && (existing.sources & TIMESTAMP_SOURCE_RFC3161) == 0;
+            if assurance < existing.assurance || (assurance == existing.assurance && !adds_rfc3161)
+            {
+                panic_with_error!(&env, RegistryError::TimestampClaimAlreadyAnchored);
+            }
+        }
+
+        env.storage().persistent().set(&key, &claim);
+
+        TimestampClaimAnchored {
+            proof_id: proof_id.clone(),
+            attestation_digest: attestation_digest.clone(),
+            sources,
+            assurance,
+            anchored_at: now,
+            ledger_sequence,
+        }
+        .publish(&env);
+
+        claim
+    }
+
+    /// Return the timestamp claim for `proof_id`, if any.
+    pub fn get_timestamp_claim(env: Env, proof_id: BytesN<32>) -> Option<TimestampClaim> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TimestampClaim(proof_id))
+    }
+
+    /// Whether the proof has an independently verifiable on-chain timestamp
+    /// source (Stellar ledger and/or RFC 3161 commitment).
+    pub fn has_independent_timestamp_anchor(env: Env, proof_id: BytesN<32>) -> bool {
+        match env
+            .storage()
+            .persistent()
+            .get::<DataKey, TimestampClaim>(&DataKey::TimestampClaim(proof_id))
+        {
+            Some(claim) => {
+                (claim.sources & (TIMESTAMP_SOURCE_STELLAR | TIMESTAMP_SOURCE_RFC3161)) != 0
+            }
+            None => false,
+        }
+    }
+
+
     // -----------------------------------------------------------------------
     // Revocation-witness root management (#98)
     // -----------------------------------------------------------------------
@@ -3356,6 +3565,43 @@ fn record_proof_history(
     .publish(env);
 }
 
+
+fn require_timestamp_claim_actor(env: &Env, actor: &Address, proof: &ProofRecord) {
+    actor.require_auth();
+
+    let admin: Address = env
+        .storage()
+        .persistent()
+        .get(&DataKey::Admin)
+        .unwrap_or_else(|| panic_with_error!(env, RegistryError::NotInitialized));
+    if actor == &admin {
+        return;
+    }
+    if let Some(ref source) = proof.source {
+        if actor == source {
+            return;
+        }
+    }
+    if let Some(ref issuer) = proof.issuer {
+        if actor == issuer {
+            return;
+        }
+    }
+    panic_with_error!(env, RegistryError::UnauthorizedTimestampActor);
+}
+
+fn compute_timestamp_assurance(sources: u32) -> u32 {
+    let independent =
+        (sources & (TIMESTAMP_SOURCE_STELLAR | TIMESTAMP_SOURCE_RFC3161)) != 0;
+    if independent {
+        return TIMESTAMP_ASSURANCE_INDEPENDENT;
+    }
+    if (sources & TIMESTAMP_SOURCE_CLAIMED) != 0 {
+        return TIMESTAMP_ASSURANCE_CLAIMED;
+    }
+    TIMESTAMP_ASSURANCE_NONE
+}
+
 /// Validate a lineage edge set: bounded fan-out and depth, no self-reference,
 /// and every parent must already be a known proof or lineage record.
 fn validate_lineage(
@@ -3998,3 +4244,5 @@ mod test_schema;
 mod test_selective_disclosure;
 #[cfg(test)]
 mod test_upgrade_compat;
+#[cfg(test)]
+mod test_timestamp_claim;

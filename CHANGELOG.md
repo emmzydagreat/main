@@ -2,6 +2,11 @@
 
 ## 1.0.0 — Unreleased
 
+- Added independent on-chain timestamp claim anchoring (`anchor_timestamp_claim`,
+  `get_timestamp_claim`, `has_independent_timestamp_anchor`) so registry proofs can
+  bind off-chain time attestations to Stellar ledger time and optional RFC 3161
+  commitments without storing tokens or secrets. See `contracts/TIMESTAMP_CLAIMS.md`.
+
 - Added a CI end-to-end environment matrix (`devx/e2e_env_matrix.py`) that exercises public API boundaries across development/testing/production-like profiles with privacy-safe failure checks.
 
 - Added an atomic compatibility manifest and release gate spanning frontend,
