@@ -39,15 +39,15 @@ has_independent_timestamp_anchor(proof_id) -> bool
 ### Authorization
 
 `actor` must authenticate and be the registry admin, the proof `source`, or the
-proof `issuer`. Otherwise `UnauthorizedTimestampActor` (71).
+proof `issuer`. Otherwise `UnauthorizedTimestampActor` (75).
 
 ### Validation
 
-* Proof must exist → else `TimestampClaimNotFound` (69)
-* `attestation_digest` must be non-zero → else `InvalidTimestampClaim` (68)
-* If `claimed_time > 0`, it must be ≤ ledger time + `MAX_TIMESTAMP_FUTURE_DRIFT_SECS` (300) → else (68)
+* Proof must exist → else `TimestampClaimNotFound` (73)
+* `attestation_digest` must be non-zero → else `InvalidTimestampClaim` (72)
+* If `claimed_time > 0`, it must be ≤ ledger time + `MAX_TIMESTAMP_FUTURE_DRIFT_SECS` (300) → else (72)
 * Absence of claimed time (`0`) and absence of RFC 3161 commitment (`[0;32]`) are valid
-* Re-anchor allowed only as an assurance upgrade or when newly adding RFC 3161 → else `TimestampClaimAlreadyAnchored` (70)
+* Re-anchor allowed only as an assurance upgrade or when newly adding RFC 3161 → else `TimestampClaimAlreadyAnchored` (74)
 
 ## Storage / migration
 

@@ -1067,13 +1067,13 @@ pub enum RegistryError {
     /// The dispute is not in the state this transition requires.
     InvalidDisputeTransition = 67,
     /// Timestamp claim is malformed, far-future, or missing required digest (#339).
-    InvalidTimestampClaim = 68,
+    InvalidTimestampClaim = 72,
     /// No timestamp claim exists for the requested proof (#339).
-    TimestampClaimNotFound = 69,
+    TimestampClaimNotFound = 73,
     /// A timestamp claim is already anchored and the update is not an upgrade (#339).
-    TimestampClaimAlreadyAnchored = 70,
+    TimestampClaimAlreadyAnchored = 74,
     /// Caller is neither admin nor the proof's source/issuer (#339).
-    UnauthorizedTimestampActor = 71,
+    UnauthorizedTimestampActor = 75,
 }
 
 #[contract]
