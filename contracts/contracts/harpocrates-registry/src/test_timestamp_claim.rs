@@ -98,7 +98,7 @@ fn absence_of_claimed_time_is_valid() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #68)")]
+#[should_panic(expected = "Error(Contract, #72)")]
 fn rejects_zero_attestation_digest() {
     let env = Env::default();
     let (client, _admin, source, proof_id) = setup_with_source_proof(&env);
@@ -106,7 +106,7 @@ fn rejects_zero_attestation_digest() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #68)")]
+#[should_panic(expected = "Error(Contract, #72)")]
 fn rejects_far_future_claimed_time() {
     let env = Env::default();
     env.ledger().set_timestamp(1_700_000_000);
@@ -123,7 +123,7 @@ fn rejects_far_future_claimed_time() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #69)")]
+#[should_panic(expected = "Error(Contract, #73)")]
 fn rejects_unknown_proof() {
     let env = Env::default();
     env.mock_all_auths();
@@ -142,7 +142,7 @@ fn rejects_unknown_proof() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #70)")]
+#[should_panic(expected = "Error(Contract, #74)")]
 fn rejects_non_upgrade_reanchor() {
     let env = Env::default();
     env.ledger().set_timestamp(1_700_000_000);
@@ -181,7 +181,7 @@ fn allows_rfc3161_upgrade_reanchor() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #71)")]
+#[should_panic(expected = "Error(Contract, #75)")]
 fn rejects_unauthorized_actor() {
     let env = Env::default();
     // Do not mock all auths for the unauthorized caller path beyond init/register.
